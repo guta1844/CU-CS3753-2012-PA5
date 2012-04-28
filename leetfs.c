@@ -5,6 +5,7 @@
   Minor modifications and note by Andy Sayler (2012) <www.andysayler.com>
   Some leetfs crypto stuff by Ken Sheedlo (2012)
     for CSCI 3753 P.A. 5 - University of Colorado at Boulder
+    LEETFS - the LEET Encrypts Everything Transparently Filesystem
 
   Source: fuse-2.8.7.tar.gz examples directory
   http://sourceforge.net/projects/fuse/files/fuse-2.X/
@@ -26,6 +27,8 @@
 
 #define FUSE_USE_VERSION 28
 #define BUFSIZE 256
+#define PAGESIZE 4096
+#define CIPHER_BLOCKSIZE 128
 #define HAVE_SETXATTR
 
 #ifdef HAVE_CONFIG_H
@@ -53,7 +56,8 @@
 
 typedef struct {
     char *rootdir;
-
+    unsigned char key[32];
+    unsigned char iv[32];
 } leet_state;
 
 static char *_leet_fullpath(char *buf, const char *path, size_t bufsize){
@@ -349,26 +353,64 @@ static int leet_open(const char *path, struct fuse_file_info *fi)
 static int leet_read(const char *path, char *buf, size_t size, off_t offset,
         struct fuse_file_info *fi)
 {
-    int fd;
+    FILE *f;
     int res;
     char pathbuf[BUFSIZE];
+    char databuf[PAGESIZE];
+    EVP_CIPHER_CTX ctx;
 
     (void) fi;
-    fd = open(_leet_fullpath(pathbuf, path, BUFSIZE), O_RDONLY);
+    f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "r");
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_read: fd = %d, ", fd);
 #endif
-    if (fd == -1)
+    if (f == NULL)
         return -errno;
 
-    res = pread(fd, buf, size, offset);
+    leet_state *state = (leet_state *)(fuse_get_context()->private_data);
+    cryptio_initctx(&ctx, state->key, CRYPTIO_DECRYPT);
+
+    int pos = 0;
+    int outlen;
+    while(cryptio_read(&ctx, f, databuf, PAGESIZE - CIPHER_BLOCKSIZE, CRYPTIO_DECRYPT, &outlen)){
+        if(pos + PAGESIZE > offset){
+            size_t bytes;
+            if(pos > offset){
+                /* Copy into the buffer starting from pos */
+                bytes = (size > outlen ? outlen : size);
+                memcpy(buf, databuf, bytes);
+                buf += bytes;
+                size -= bytes;
+            }else{
+                /* pos <= offset */
+                int index = offset - pos;
+                outlen -= index;
+                bytes = (size > outlen ? outlen : size);
+                memcpy(buf, databuf + index, bytes);
+                buf += bytes;
+                size -= bytes;
+            }
+            if(size == 0){
+                outlen = 0;
+                break;
+            }
+        }
+        pos += (PAGESIZE - CIPHER_BLOCKSIZE);
+    }
+    if(size != 0){
+        /* EOF was reached */
+        size_t bytes = (size > outlen ? outlen : size);
+        memcpy(buf, databuf, bytes);
+    }
+
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
 #endif
     if (res == -1)
         res = -errno;
 
-    close(fd);
+    EVP_CIPHER_CTX_cleanup(&ctx);
+    fclose(f);
     return res;
 }
 
@@ -543,8 +585,19 @@ int main(int argc, char *argv[])
 #endif
         fprintf(stderr, "leetfs usage: ./pa5-encfs %s %s %s\n",
                 "<Key Phrase>", "<Mirror Directory>", "<Mount Point>");
+        return 1;
     }
 
     state.rootdir = realpath(argv[2], NULL);
+    
+    int i;
+    i = EVP_BytesToKey(EVP_aes_256_cbc(), EVP_sha1(), NULL, 
+            (unsigned char *)argv[1], strlen(argv[1]), 5, state.key, state.iv);
+    if(i != 32){
+        fprintf(stderr, "Error: key size is %d bits - should be 256 bits\n",
+                i * 8);
+        return 1;
+    }
+
     return fuse_main(argc - 2, argv + 2, &xmp_oper, &state);
 }
