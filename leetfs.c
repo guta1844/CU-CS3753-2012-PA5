@@ -54,10 +54,15 @@
 #include <sys/xattr.h>
 #endif
 
+#include <openssl/evp.h>
+#include <openssl/aes.h>
+
+#include "aes-crypt.h"
+
 typedef struct {
     char *rootdir;
-    unsigned char key[32];
-    unsigned char iv[32];
+    char key[32];
+    char iv[32];
 } leet_state;
 
 static char *_leet_fullpath(char *buf, const char *path, size_t bufsize){
@@ -353,55 +358,24 @@ static int leet_open(const char *path, struct fuse_file_info *fi)
 static int leet_read(const char *path, char *buf, size_t size, off_t offset,
         struct fuse_file_info *fi)
 {
-    FILE *f;
+    FILE *f, *tmp;
     int res;
     char pathbuf[BUFSIZE];
-    char databuf[PAGESIZE];
-    EVP_CIPHER_CTX ctx;
 
     (void) fi;
     f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "r");
+    tmp = tmpfile();
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_read: fd = %d, ", fd);
 #endif
-    if (f == NULL)
+    if (f == NULL || tmp == NULL)
         return -errno;
 
+    /* Assume file is encrypted. Decrypt */
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    cryptio_initctx(&ctx, state->key, CRYPTIO_DECRYPT);
-
-    int pos = 0;
-    int outlen;
-    while(cryptio_read(&ctx, f, databuf, PAGESIZE - CIPHER_BLOCKSIZE, CRYPTIO_DECRYPT, &outlen)){
-        if(pos + PAGESIZE > offset){
-            size_t bytes;
-            if(pos > offset){
-                /* Copy into the buffer starting from pos */
-                bytes = (size > outlen ? outlen : size);
-                memcpy(buf, databuf, bytes);
-                buf += bytes;
-                size -= bytes;
-            }else{
-                /* pos <= offset */
-                int index = offset - pos;
-                outlen -= index;
-                bytes = (size > outlen ? outlen : size);
-                memcpy(buf, databuf + index, bytes);
-                buf += bytes;
-                size -= bytes;
-            }
-            if(size == 0){
-                outlen = 0;
-                break;
-            }
-        }
-        pos += (PAGESIZE - CIPHER_BLOCKSIZE);
-    }
-    if(size != 0){
-        /* EOF was reached */
-        size_t bytes = (size > outlen ? outlen : size);
-        memcpy(buf, databuf, bytes);
-    }
+    do_crypt(f, tmp, 0, state->key);
+    res = pread(fileno(tmp), buf, size, offset);
+    fclose(tmp);
 
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
@@ -409,7 +383,6 @@ static int leet_read(const char *path, char *buf, size_t size, off_t offset,
     if (res == -1)
         res = -errno;
 
-    EVP_CIPHER_CTX_cleanup(&ctx);
     fclose(f);
     return res;
 }
@@ -417,26 +390,31 @@ static int leet_read(const char *path, char *buf, size_t size, off_t offset,
 static int leet_write(const char *path, const char *buf, size_t size,
         off_t offset, struct fuse_file_info *fi)
 {
-    int fd;
+    FILE *f, *tmp;
     int res;
     char pathbuf[BUFSIZE];
 
     (void) fi;
-    fd = open(_leet_fullpath(pathbuf, path, BUFSIZE), O_WRONLY);
+    f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "w");
+    tmp = tmpfile();
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_write: fd = %d, ", fd);
 #endif
-    if (fd == -1)
+    if (f == NULL || tmp == NULL)
         return -errno;
 
-    res = pwrite(fd, buf, size, offset);
+    /* Always encrypt the file data */
+    leet_state *state = (leet_state *)(fuse_get_context()->private_data);
+    do_crypt(f, tmp, 1, state->key);
+    res = pwrite(fileno(tmp), buf, size, offset);
+    fclose(tmp);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
 #endif
     if (res == -1)
         res = -errno;
 
-    close(fd);
+    fclose(f);
     return res;
 }
 
@@ -589,15 +567,8 @@ int main(int argc, char *argv[])
     }
 
     state.rootdir = realpath(argv[2], NULL);
+    strncpy(state.key, argv[1], 32);
+    state.key[31] = '\0';
     
-    int i;
-    i = EVP_BytesToKey(EVP_aes_256_cbc(), EVP_sha1(), NULL, 
-            (unsigned char *)argv[1], strlen(argv[1]), 5, state.key, state.iv);
-    if(i != 32){
-        fprintf(stderr, "Error: key size is %d bits - should be 256 bits\n",
-                i * 8);
-        return 1;
-    }
-
     return fuse_main(argc - 2, argv + 2, &xmp_oper, &state);
 }
