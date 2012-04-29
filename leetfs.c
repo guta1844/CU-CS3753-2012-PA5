@@ -43,6 +43,7 @@
 #define _XOPEN_SOURCE 500
 #endif
 
+#define _GNU_SOURCE
 #include <fuse.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -359,24 +360,30 @@ static int leet_open(const char *path, struct fuse_file_info *fi)
 static int leet_read(const char *path, char *buf, size_t size, off_t offset,
         struct fuse_file_info *fi)
 {
-    FILE *f, *tmp;
+    FILE *f, *memstream;
     int res;
     char pathbuf[BUFSIZE];
+    char *membuf;
+    size_t memsize;
 
     (void) fi;
     f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "r");
-    tmp = tmpfile();
+    memstream = open_memstream(&membuf, &memsize);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_read: fd = %d, ", fd);
 #endif
-    if (f == NULL || tmp == NULL)
+    if (f == NULL || memstream == NULL)
         return -errno;
 
     /* Assume file is encrypted. Decrypt */
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(f, tmp, AES_PASSTHRU, state->key);
+    do_crypt(f, memstream, AES_PASSTHRU, state->key);
+    fflush(memstream);
+#if 0
     res = pread(fileno(tmp), buf, size, offset);
-    fclose(tmp);
+#endif
+    res = pread(fileno(memstream), buf, size, offset);
+    fclose(memstream);
 
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
@@ -391,32 +398,35 @@ static int leet_read(const char *path, char *buf, size_t size, off_t offset,
 static int leet_write(const char *path, const char *buf, size_t size,
         off_t offset, struct fuse_file_info *fi)
 {
-    FILE *f, *tmp;
+    FILE *f, *memstream;
     int res;
     char pathbuf[BUFSIZE];
+    char *membuf;
+    size_t memsize;
 
     (void) fi;
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
     f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "r");
-    tmp = tmpfile();
+    memstream = open_memstream(&membuf, &memsize);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_write: fd = %d, ", fd);
 #endif
-    if (tmp == NULL)
+    if (memstream == NULL)
         return -errno;
 
     if(f != NULL){
         /* Decrypt into the temporary file */
-        do_crypt(f, tmp, AES_PASSTHRU, state->key);
+        do_crypt(f, memstream, AES_PASSTHRU, state->key);
         fclose(f);
     }
 
-    res = pwrite(fileno(tmp), buf, size, offset);
+    res = pwrite(fileno(memstream), buf, size, offset);
+    fflush(memstream);
     f = fopen(pathbuf, "w");
 
     /* Always encrypt the file data */
-    do_crypt(tmp, f, AES_PASSTHRU, state->key);
-    fclose(tmp);
+    do_crypt(memstream, f, AES_PASSTHRU, state->key);
+    fclose(memstream);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
 #endif
