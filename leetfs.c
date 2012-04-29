@@ -377,12 +377,16 @@ static int leet_read(const char *path, char *buf, size_t size, off_t offset,
 
     /* Assume file is encrypted. Decrypt */
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(f, memstream, AES_PASSTHRU, state->key);
+    do_crypt(f, memstream, AES_DECRYPT, state->key);
     fflush(memstream);
 #if 0
     res = pread(fileno(tmp), buf, size, offset);
 #endif
+    fseek(memstream, offset, SEEK_SET);
+#if 0
     res = pread(fileno(memstream), buf, size, offset);
+#endif
+    res = fread(buf, 1, size, memstream);
     fclose(memstream);
 
 #ifdef PRINTF_DEBUG
@@ -416,16 +420,20 @@ static int leet_write(const char *path, const char *buf, size_t size,
 
     if(f != NULL){
         /* Decrypt into the temporary file */
-        do_crypt(f, memstream, AES_PASSTHRU, state->key);
+        do_crypt(f, memstream, AES_DECRYPT, state->key);
         fclose(f);
     }
 
+    fseek(memstream, offset, SEEK_SET);
+#if 0
     res = pwrite(fileno(memstream), buf, size, offset);
+#endif
+    res = fwrite(buf, 1, size, memstream);
     fflush(memstream);
     f = fopen(pathbuf, "w");
 
     /* Always encrypt the file data */
-    do_crypt(memstream, f, AES_PASSTHRU, state->key);
+    do_crypt(memstream, f, AES_ENCRYPT, state->key);
     fclose(memstream);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
@@ -467,7 +475,7 @@ static int leet_create(const char* path, mode_t mode, struct fuse_file_info* fi)
 
     FILE *tmp = tmpfile();
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(tmp, fdopen(res, "w"), 1, state->key);
+    do_crypt(tmp, fdopen(res, "w"), AES_ENCRYPT, state->key);
     fclose(tmp);
 
     close(res);
