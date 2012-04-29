@@ -395,7 +395,7 @@ static int leet_write(const char *path, const char *buf, size_t size,
     char pathbuf[BUFSIZE];
 
     (void) fi;
-    f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "w");
+    f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "r");
     tmp = tmpfile();
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_write: fd = %d, ", fd);
@@ -405,7 +405,7 @@ static int leet_write(const char *path, const char *buf, size_t size,
 
     /* Always encrypt the file data */
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(f, tmp, 1, state->key);
+    do_crypt(f, tmp, 0, state->key);
     res = pwrite(fileno(tmp), buf, size, offset);
     fclose(tmp);
 #ifdef PRINTF_DEBUG
