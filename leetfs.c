@@ -29,6 +29,9 @@
 #define BUFSIZE 256
 #define PAGESIZE 4096
 #define CIPHER_BLOCKSIZE 128
+#define AES_ENCRYPT 1
+#define AES_DECRYPT 0
+#define AES_PASSTHRU -1
 #define HAVE_SETXATTR
 
 #ifdef HAVE_CONFIG_H
@@ -85,9 +88,7 @@ static int leet_getattr(const char *path, struct stat *stbuf)
 
     return 0;
 }
-
-static int leet_access(const char *path, int mask)
-{
+static int leet_access(const char *path, int mask) {
     int res;
     char buf[BUFSIZE];
 
@@ -373,7 +374,7 @@ static int leet_read(const char *path, char *buf, size_t size, off_t offset,
 
     /* Assume file is encrypted. Decrypt */
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(f, tmp, 0, state->key);
+    do_crypt(f, tmp, AES_PASSTHRU, state->key);
     res = pread(fileno(tmp), buf, size, offset);
     fclose(tmp);
 
@@ -395,18 +396,26 @@ static int leet_write(const char *path, const char *buf, size_t size,
     char pathbuf[BUFSIZE];
 
     (void) fi;
+    leet_state *state = (leet_state *)(fuse_get_context()->private_data);
     f = fopen(_leet_fullpath(pathbuf, path, BUFSIZE), "r");
     tmp = tmpfile();
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_write: fd = %d, ", fd);
 #endif
-    if (f == NULL || tmp == NULL)
+    if (tmp == NULL)
         return -errno;
 
-    /* Always encrypt the file data */
-    leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(f, tmp, 0, state->key);
+    if(f != NULL){
+        /* Decrypt into the temporary file */
+        do_crypt(f, tmp, AES_PASSTHRU, state->key);
+        fclose(f);
+    }
+
     res = pwrite(fileno(tmp), buf, size, offset);
+    f = fopen(pathbuf, "w");
+
+    /* Always encrypt the file data */
+    do_crypt(tmp, f, AES_PASSTHRU, state->key);
     fclose(tmp);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
@@ -445,6 +454,11 @@ static int leet_create(const char* path, mode_t mode, struct fuse_file_info* fi)
 #endif
     if(res == -1)
         return -errno;
+
+    FILE *tmp = tmpfile();
+    leet_state *state = (leet_state *)(fuse_get_context()->private_data);
+    do_crypt(tmp, fdopen(res, "w"), 1, state->key);
+    fclose(tmp);
 
     close(res);
 
