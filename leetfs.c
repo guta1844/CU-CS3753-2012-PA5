@@ -33,7 +33,7 @@
 #define AES_DECRYPT 0
 #define AES_PASSTHRU -1
 #define HAVE_SETXATTR
-#define ENCRYPTED_ATTR  "pa5-encfs.encrypted"
+#define ENCRYPTED_ATTR  "user.pa5-encfs.encrypted"
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
