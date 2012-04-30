@@ -33,6 +33,7 @@
 #define AES_DECRYPT 0
 #define AES_PASSTHRU -1
 #define HAVE_SETXATTR
+#define ENCRYPTED_ATTR  "pa5-encfs.encrypted"
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -375,9 +376,16 @@ static int leet_read(const char *path, char *buf, size_t size, off_t offset,
     if (f == NULL || memstream == NULL)
         return -errno;
 
+    char attrbuf[8];
+    ssize_t attr_len = getxattr(pathbuf, ENCRYPTED_ATTR, attrbuf, 8);
+    int crypt_action = AES_PASSTHRU;
+    if(attr_len != -1 && !memcmp(attrbuf, "true", 4)){
+        crypt_action = AES_DECRYPT;
+    }
+
     /* Assume file is encrypted. Decrypt */
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(f, memstream, AES_DECRYPT, state->key);
+    do_crypt(f, memstream, crypt_action, state->key);
     fflush(memstream);
 #if 0
     res = pread(fileno(tmp), buf, size, offset);
@@ -418,9 +426,16 @@ static int leet_write(const char *path, const char *buf, size_t size,
     if (memstream == NULL)
         return -errno;
 
+    char attrbuf[8];
+    ssize_t attr_len = getxattr(pathbuf, ENCRYPTED_ATTR, attrbuf, 8);
+    int encrypted = 0;
+    if(attr_len != -1 && !memcmp(attrbuf, "true", 4)){
+        encrypted = 1;
+    }
+
     if(f != NULL){
         /* Decrypt into the temporary file */
-        do_crypt(f, memstream, AES_DECRYPT, state->key);
+        do_crypt(f, memstream, (encrypted ? AES_DECRYPT : AES_PASSTHRU), state->key);
         fclose(f);
     }
 
@@ -433,7 +448,8 @@ static int leet_write(const char *path, const char *buf, size_t size,
     f = fopen(pathbuf, "w");
 
     /* Always encrypt the file data */
-    do_crypt(memstream, f, AES_ENCRYPT, state->key);
+    fseek(memstream, 0, SEEK_SET);
+    do_crypt(memstream, f, (encrypted ? AES_ENCRYPT : AES_PASSTHRU), state->key);
     fclose(memstream);
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "res = %d\n", res);
@@ -463,22 +479,28 @@ static int leet_statfs(const char *path, struct statvfs *stbuf)
 static int leet_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
 
     (void) fi;
+    (void) mode;
     char buf[BUFSIZE];
 
-    int res;
-    res = creat(_leet_fullpath(buf, path, BUFSIZE), mode);
+    FILE *res;
+    res = fopen(_leet_fullpath(buf, path, BUFSIZE), "w");
 #ifdef PRINTF_DEBUG
     fprintf(stderr, "leet_create: res = %d\n", res);
 #endif
-    if(res == -1)
+    if(res == NULL)
         return -errno;
 
     FILE *tmp = tmpfile();
     leet_state *state = (leet_state *)(fuse_get_context()->private_data);
-    do_crypt(tmp, fdopen(res, "w"), AES_ENCRYPT, state->key);
+    do_crypt(tmp, res, AES_ENCRYPT, state->key);
     fclose(tmp);
 
-    close(res);
+    if(fsetxattr(fileno(res), ENCRYPTED_ATTR, "true", 4, 0)){
+        return -errno;
+    }
+
+    fclose(res);
+
 
     return 0;
 }
